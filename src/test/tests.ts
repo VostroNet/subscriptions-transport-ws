@@ -33,7 +33,7 @@ import {
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { SubscriptionServer, ExecutionParams } from '../server';
 import { SubscriptionClient } from '../client';
-import { OperationMessage } from '../server';
+import { OperationMessage, ConnectionContext } from '../server';
 import { $$asyncIterator } from 'iterall';
 
 const TEST_PORT = 4953;
@@ -1263,7 +1263,47 @@ describe('Server', function () {
       });
     });
   });
+  it('should return default schema via promise', (done) => {
+    const server = createServer(notFoundRequestListener);
+    server.listen(SERVER_EXECUTOR_TESTS_PORT);
 
+    const subServer = SubscriptionServer.create({
+      schema: sinon.spy((connectionContext: ConnectionContext, params: any) => {
+        console.log("params", params)
+        return Promise.resolve(schema);
+      }),
+      subscribe,
+      execute,
+      onConnect: sinon.spy(() => {
+        return { test: 'test context' };
+      }),
+    }, {
+      server,
+      path: '/',
+    });
+
+    const client = new SubscriptionClient(`ws://localhost:${SERVER_EXECUTOR_TESTS_PORT}/`);
+    client.onDisconnected(() => {
+      server.close();
+      done();
+    });
+
+    client.onConnected(() => {
+      client.request({
+        query: `query { testString }`,
+        variables: {},
+      }).subscribe({
+        next: (res) => {
+          if (res.errors) {
+            assert(false, 'unexpected error from request');
+          } else {
+            expect(res.data).to.deep.equal({ testString: 'value' });
+          }
+        },
+        complete: () => subServer.close(),
+      });
+    });
+  });
   it('server close should work', (done) => {
     const server = createServer(notFoundRequestListener);
     server.listen(SERVER_EXECUTOR_TESTS_PORT);

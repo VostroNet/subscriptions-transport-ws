@@ -75,13 +75,14 @@ export type SubscribeFunction = (schema: GraphQLSchema,
                                  AsyncIterator<ExecutionResult> |
                                  Promise<AsyncIterator<ExecutionResult> | ExecutionResult>;
 
+export type SchemaFunction = (connection: ConnectionContext, params: any) => Promise<AsyncIterator<GraphQLSchema> | GraphQLSchema>;
+
 export interface ServerOptions {
   rootValue?: any;
-  schema?: GraphQLSchema;
+  schema?: GraphQLSchema | SchemaFunction;
   execute?: ExecuteFunction;
   subscribe?: SubscribeFunction;
   validationRules?: Array<(context: ValidationContext) => any>;
-
   onOperation?: Function;
   onOperationComplete?: Function;
   onConnect?: Function;
@@ -98,7 +99,7 @@ export class SubscriptionServer {
   private wsServer: WebSocket.Server;
   private execute: ExecuteFunction;
   private subscribe: SubscribeFunction;
-  private schema: GraphQLSchema;
+  private schema: GraphQLSchema | Function;
   private rootValue: any;
   private keepAlive: number;
   private closeHandler: () => void;
@@ -340,8 +341,12 @@ export class SubscriptionServer {
               let messageForCallback: any = parsedMessage;
               promisedParams = Promise.resolve(this.onOperation(messageForCallback, baseParams, connectionContext.socket));
             }
-
             promisedParams.then((params: any) => {
+              return ((this.schema instanceof GraphQLSchema) ?
+              Promise.resolve(this.schema) :
+              Promise.resolve(this.schema(connectionContext, params)))
+                .then((schema) => [params, schema])
+            }).then(([params, schema]) => {
               if (typeof params !== 'object') {
                 const error = `Invalid params returned from onOperation! return values must be an object!`;
                 this.sendError(connectionContext, opId, { message: error });
@@ -351,7 +356,7 @@ export class SubscriptionServer {
 
               const document = typeof baseParams.query !== 'string' ? baseParams.query : parse(baseParams.query);
               let executionIterable: Promise<AsyncIterator<ExecutionResult> | ExecutionResult>;
-              const validationErrors: Error[] = validate(this.schema, document, this.specifiedRules);
+              const validationErrors: Error[] = validate(schema, document, this.specifiedRules);
 
               if ( validationErrors.length > 0 ) {
                 executionIterable = Promise.resolve(createIterableFromPromise<ExecutionResult>(
@@ -363,7 +368,7 @@ export class SubscriptionServer {
                   executor = this.subscribe;
                 }
 
-                const promiseOrIterable = executor(this.schema,
+                const promiseOrIterable = executor(schema,
                   document,
                   this.rootValue,
                   params.context,
