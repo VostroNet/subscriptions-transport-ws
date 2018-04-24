@@ -15,7 +15,6 @@ import {
 } from 'graphql';
 import { createEmptyIterable } from './utils/empty-iterable';
 import { createAsyncIterator, forAwaitEach, isAsyncIterable } from 'iterall';
-import { createIterableFromPromise } from './utils/promise-to-iterable';
 import { isASubscriptionOperation } from './utils/is-subscriptions';
 import { parseLegacyProtocolMessage } from './legacy/parse-legacy-protocol';
 import { IncomingMessage } from 'http';
@@ -36,6 +35,7 @@ export type ConnectionContext = {
   initPromise?: Promise<any>,
   isLegacy: boolean,
   socket: WebSocket,
+  request: IncomingMessage,
   operations: {
     [opId: string]: ExecutionIterator,
   },
@@ -141,20 +141,11 @@ export class SubscriptionServer {
       }
 
       const connectionContext: ConnectionContext = Object.create(null);
+      connectionContext.initPromise = Promise.resolve(true);
       connectionContext.isLegacy = false;
       connectionContext.socket = socket;
+      connectionContext.request = request;
       connectionContext.operations = {};
-
-      // Regular keep alive messages if keepAlive is set
-      if (this.keepAlive) {
-        const keepAliveTimer = setInterval(() => {
-          if (socket.readyState === WebSocket.OPEN) {
-            this.sendMessage(connectionContext, undefined, MessageTypes.GQL_CONNECTION_KEEP_ALIVE, undefined);
-          } else {
-            clearInterval(keepAliveTimer);
-          }
-        }, this.keepAlive);
-      }
 
       const connectionClosedHandler = (error: any) => {
         if (error) {
@@ -173,7 +164,7 @@ export class SubscriptionServer {
         this.onClose(connectionContext);
 
         if (this.onDisconnect) {
-          this.onDisconnect(socket);
+          this.onDisconnect(socket, connectionContext);
         }
       };
 
@@ -235,13 +226,6 @@ export class SubscriptionServer {
   }
 
   private onMessage(connectionContext: ConnectionContext) {
-    let onInitResolve: any = null, onInitReject: any = null;
-
-    connectionContext.initPromise = new Promise((resolve, reject) => {
-      onInitResolve = resolve;
-      onInitReject = reject;
-    });
-
     return (message: any) => {
       let parsedMessage: OperationMessage;
       try {
@@ -254,9 +238,8 @@ export class SubscriptionServer {
       const opId = parsedMessage.id;
       switch (parsedMessage.type) {
         case MessageTypes.GQL_CONNECTION_INIT:
-          let onConnectPromise = Promise.resolve(true);
           if (this.onConnect) {
-            onConnectPromise = new Promise((resolve, reject) => {
+            connectionContext.initPromise = new Promise((resolve, reject) => {
               try {
                 // TODO - this should become a function call with just 2 arguments in the future
                 // when we release the breaking change api: parsedMessage.payload and connectionContext
@@ -266,8 +249,6 @@ export class SubscriptionServer {
               }
             });
           }
-
-          onInitResolve(onConnectPromise);
 
           connectionContext.initPromise.then((result) => {
             if (result === false) {
@@ -282,12 +263,15 @@ export class SubscriptionServer {
             );
 
             if (this.keepAlive) {
-              this.sendMessage(
-                connectionContext,
-                undefined,
-                MessageTypes.GQL_CONNECTION_KEEP_ALIVE,
-                undefined,
-              );
+              this.sendKeepAlive(connectionContext);
+              // Regular keep alive messages if keepAlive is set
+              const keepAliveTimer = setInterval(() => {
+                if (connectionContext.socket.readyState === WebSocket.OPEN) {
+                  this.sendKeepAlive(connectionContext);
+                } else {
+                  clearInterval(keepAliveTimer);
+                }
+              }, this.keepAlive);
             }
           }).catch((error: Error) => {
             this.sendError(
@@ -323,10 +307,7 @@ export class SubscriptionServer {
               query: parsedMessage.payload.query,
               variables: parsedMessage.payload.variables,
               operationName: parsedMessage.payload.operationName,
-              context: Object.assign(
-                {},
-                isObject(initResult) ? initResult : {},
-              ),
+              context: isObject(initResult) ? Object.assign(Object.create(Object.getPrototypeOf(initResult)), initResult) : {},
               formatResponse: <any>undefined,
               formatError: <any>undefined,
               callback: <any>undefined,
@@ -350,48 +331,32 @@ export class SubscriptionServer {
               }
 
               const document = typeof baseParams.query !== 'string' ? baseParams.query : parse(baseParams.query);
-              let executionIterable: Promise<AsyncIterator<ExecutionResult> | ExecutionResult>;
+              let executionPromise: Promise<AsyncIterator<ExecutionResult> | ExecutionResult>;
               const validationErrors: Error[] = validate(this.schema, document, this.specifiedRules);
 
               if ( validationErrors.length > 0 ) {
-                executionIterable = Promise.resolve(createIterableFromPromise<ExecutionResult>(
-                  Promise.resolve({ errors: validationErrors }),
-                ));
+                executionPromise = Promise.resolve({ errors: validationErrors });
               } else {
                 let executor: SubscribeFunction | ExecuteFunction = this.execute;
                 if (this.subscribe && isASubscriptionOperation(document, params.operationName)) {
                   executor = this.subscribe;
                 }
-
-                const promiseOrIterable = executor(this.schema,
+                executionPromise = Promise.resolve(executor(this.schema,
                   document,
                   this.rootValue,
                   params.context,
                   params.variables,
-                  params.operationName);
-
-                if (!isAsyncIterable(promiseOrIterable) && promiseOrIterable instanceof Promise) {
-                  executionIterable = promiseOrIterable;
-                } else if (isAsyncIterable(promiseOrIterable)) {
-                  executionIterable = Promise.resolve(promiseOrIterable as any as AsyncIterator<ExecutionResult>);
-                } else {
-                  // Unexpected return value from execute - log it as error and trigger an error to client side
-                  console.error('Invalid `execute` return type! Only Promise or AsyncIterable are valid values!');
-
-                  this.sendError(connectionContext, opId, {
-                    message: 'GraphQL execute engine is not available',
-                  });
-                }
+                  params.operationName));
               }
 
-              return executionIterable.then((ei) => ({
-                executionIterable: isAsyncIterable(ei) ?
-                  ei : createAsyncIterator([ ei ]),
+              return executionPromise.then((executionResult) => ({
+                executionIterable: isAsyncIterable(executionResult) ?
+                  executionResult : createAsyncIterator([ executionResult ]),
                 params,
               }));
             }).then(({ executionIterable, params }) => {
               forAwaitEach(
-                createAsyncIterator(executionIterable) as any,
+                executionIterable as any,
                 (value: ExecutionResult) => {
                   let result = value;
 
@@ -445,20 +410,31 @@ export class SubscriptionServer {
               this.unsubscribe(connectionContext, opId);
               return;
             });
+            return promisedParams;
+          }).catch((error) => {
+            // Handle initPromise rejected
+            this.sendError(connectionContext, opId, { message: error.message });
+            this.unsubscribe(connectionContext, opId);
           });
           break;
 
         case MessageTypes.GQL_STOP:
-          connectionContext.initPromise.then(() => {
-            // Find subscription id. Call unsubscribe.
-            this.unsubscribe(connectionContext, opId);
-          });
+          // Find subscription id. Call unsubscribe.
+          this.unsubscribe(connectionContext, opId);
           break;
 
         default:
           this.sendError(connectionContext, opId, { message: 'Invalid message type!' });
       }
     };
+  }
+
+  private sendKeepAlive(connectionContext: ConnectionContext): void {
+    if (connectionContext.isLegacy) {
+      this.sendMessage(connectionContext, undefined, MessageTypes.KEEP_ALIVE, undefined);
+    } else {
+      this.sendMessage(connectionContext, undefined, MessageTypes.GQL_CONNECTION_KEEP_ALIVE, undefined);
+    }
   }
 
   private sendMessage(connectionContext: ConnectionContext, opId: string, type: string, payload: any): void {
@@ -492,3 +468,4 @@ export class SubscriptionServer {
     );
   }
 }
+

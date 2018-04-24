@@ -2,6 +2,35 @@
 
 ### vNEXT
 
+### v0.9.8
+- added `error` event to handle connection errors and debug network troubles [PR #341](https://github.com/apollographql/subscriptions-transport-ws/pull/341).
+- added feature inactivityTimeout [PR #390](https://github.com/apollographql/subscriptions-transport-ws/pull/390)
+
+### v0.9.7
+- change default timeout from 10s to 30s [PR #368](https://github.com/apollographql/subscriptions-transport-ws/pull/368)
+- pass `request` (`upgradeReq`) to `ConnectionContext` [PR #369](https://github.com/apollographql/subscriptions-transport-ws/pull/369)
+- pass `ConnectionContext` to `onDisconnect()` as second argument [PR #369](https://github.com/apollographql/subscriptions-transport-ws/pull/369)
+
+### 0.9.6
+- fix shallow cloning on contexts which are classes
+- upgrade to support graphql 0.13.X
+- bump iterall version [PR #362](https://github.com/apollographql/subscriptions-transport-ws/pull/362)
+
+### 0.9.5
+- docs(setup): Fix dead link to subscriptions-to-schema
+- upgrade to support graphql 0.12.X
+
+### 0.9.4
+- fix unhandledRejection error in GQL_START handling if initPromise rejected [PR #310](https://github.com/apollographql/subscriptions-transport-ws/pull/310)
+
+### 0.9.3
+- fix unhandledRejection error in GQL_STOP handling if initPromise rejected [PR #309](https://github.com/apollographql/subscriptions-transport-ws/pull/309)
+- fix return of init error message to legacy clients [PR #309](https://github.com/apollographql/subscriptions-transport-ws/pull/309)
+
+### 0.9.2
+- fix format of keep alive message sent to legacy clients. [PR #297](https://github.com/apollographql/subscriptions-transport-ws/pull/297)
+- fix(isPromise): Made checks for promises in server.ts loose to allow for augmented and polyfilled promises. [PR #304](https://github.com/apollographql/subscriptions-transport-ws/pull/304)
+
 ### 0.9.1
 - docs(KEEP_ALIVE): Updated protocol docs to explain the correct server implementation of `GQL_CONNECTION_INIT`, `GQL_CONNECTION_ACK` and `GQL_CONNECTION_KEEP_ALIVE` [PR #279](https://github.com/apollographql/subscriptions-transport-ws/pull/279)
 - docs(language-typos): Update documentation to remove some language typos [PR #282](https://github.com/apollographql/subscriptions-transport-ws/pull/282)

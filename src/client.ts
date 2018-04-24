@@ -65,6 +65,7 @@ export interface ClientOptions {
   reconnectionAttempts?: number;
   connectionCallback?: (error: Error[], result?: any) => void;
   lazy?: boolean;
+  inactivityTimeout?: number;
 }
 
 export class SubscriptionClient {
@@ -82,6 +83,8 @@ export class SubscriptionClient {
   private connectionCallback: any;
   private eventEmitter: EventEmitter;
   private lazy: boolean;
+  private inactivityTimeout: number;
+  private inactivityTimeoutId: any;
   private closedByUser: boolean;
   private wsImpl: any;
   private wasKeepAliveReceived: boolean;
@@ -99,6 +102,7 @@ export class SubscriptionClient {
       reconnect = false,
       reconnectionAttempts = Infinity,
       lazy = false,
+      inactivityTimeout = 0,
     } = (options || {});
 
     this.wsImpl = webSocketImpl || NativeWebSocket;
@@ -118,6 +122,7 @@ export class SubscriptionClient {
     this.reconnecting = false;
     this.reconnectionAttempts = reconnectionAttempts;
     this.lazy = !!lazy;
+    this.inactivityTimeout = inactivityTimeout;
     this.closedByUser = false;
     this.backoff = new Backoff({ jitter: 0.5 });
     this.eventEmitter = new EventEmitter();
@@ -139,6 +144,7 @@ export class SubscriptionClient {
   }
 
   public close(isForced = true, closedByUser = true) {
+    this.clearInactivityTimeout();
     if (this.client !== null) {
       this.closedByUser = closedByUser;
 
@@ -166,6 +172,8 @@ export class SubscriptionClient {
     const unsubscribe = this.unsubscribe.bind(this);
 
     let opId: string;
+
+    this.clearInactivityTimeout();
 
     return {
       [$$observable]() {
@@ -232,6 +240,10 @@ export class SubscriptionClient {
 
   public onReconnecting(callback: ListenerFn, context?: any): Function {
     return this.on('reconnecting', callback, context);
+  }
+
+  public onError(callback: ListenerFn, context?: any): Function {
+    return this.on('error', callback, context);
   }
 
   public unsubscribeAll() {
@@ -348,6 +360,23 @@ export class SubscriptionClient {
     }
   }
 
+  private clearInactivityTimeout() {
+    if (this.inactivityTimeoutId) {
+      clearTimeout(this.inactivityTimeoutId);
+      this.inactivityTimeoutId = null;
+    }
+  }
+
+  private setInactivityTimeout() {
+    if (this.inactivityTimeout > 0 && Object.keys(this.operations).length === 0) {
+      this.inactivityTimeoutId = setTimeout(() => {
+        if (Object.keys(this.operations).length === 0) {
+          this.close();
+        }
+      }, this.inactivityTimeout);
+    }
+  }
+
   private checkOperationOptions(options: OperationOptions, handler: (error: Error[], result?: any) => void) {
     const { query, variables, operationName } = options;
 
@@ -416,9 +445,8 @@ export class SubscriptionClient {
     switch (this.status) {
       case this.wsImpl.OPEN:
         let serializedMessage: string = JSON.stringify(message);
-        let parsedMessage: any;
         try {
-          parsedMessage = JSON.parse(serializedMessage);
+          JSON.parse(serializedMessage);
         } catch (e) {
           throw new Error(`Message must be JSON-serializable. Got: ${message}`);
         }
@@ -515,9 +543,10 @@ export class SubscriptionClient {
       }
     };
 
-    this.client.onerror = () => {
+    this.client.onerror = (err: Error) => {
       // Capture and ignore errors to prevent unhandled exceptions, wait for
       // onclose to fire before attempting a reconnect.
+      this.eventEmitter.emit('error', err);
     };
 
     this.client.onmessage = ({ data }: {data: any}) => {
@@ -604,6 +633,7 @@ export class SubscriptionClient {
   private unsubscribe(opId: string) {
     if (this.operations[opId]) {
       delete this.operations[opId];
+      this.setInactivityTimeout();
       this.sendMessage(opId, MessageTypes.GQL_STOP, undefined);
     }
   }
