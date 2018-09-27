@@ -269,6 +269,50 @@ describe('Client', function () {
     new SubscriptionClient(`ws://localhost:${RAW_TEST_PORT}/`);
   });
 
+  it('should subscribe once after reconnect', (done) => {
+    let isClientReconnected = false;
+    let subscriptionsCount = 0;
+
+    wsServer.on('headers', () => {
+      if (!isClientReconnected) {
+        isClientReconnected = true;
+        const stop = Date.now() + 1100;
+        while (Date.now() < stop) {
+          // busy wait
+        }
+      }
+    });
+
+    wsServer.on('connection', (connection: any) => {
+      connection.on('message', (message: any) => {
+        const parsedMessage = JSON.parse(message);
+
+        if (parsedMessage.type === MessageTypes.GQL_START) {
+          subscriptionsCount++;
+        }
+      });
+    });
+
+    const client = new SubscriptionClient(`ws://localhost:${RAW_TEST_PORT}/`, {
+      reconnect: true,
+      reconnectionAttempts: 1,
+    });
+
+    client.request({
+      query: `subscription useInfo {
+        user(id: 3) {
+          id
+          name
+        }
+      }`,
+    }).subscribe({});
+
+    setTimeout(() => {
+      expect(subscriptionsCount).to.be.equal(1);
+      done();
+    }, 1500);
+  });
+
   it('should send GQL_CONNECTION_INIT message first, then the GQL_START message', (done) => {
     let initReceived = false;
 
@@ -519,6 +563,68 @@ describe('Client', function () {
     });
   });
 
+  it('should send connectionParams which resolves from a promise along with init message', (done) => {
+    const connectionParams: any = {
+      test: true,
+    };
+    wsServer.on('connection', (connection: any) => {
+      connection.on('message', (message: any) => {
+        const parsedMessage = JSON.parse(message);
+        expect(JSON.stringify(parsedMessage.payload)).to.equal(JSON.stringify(connectionParams));
+        done();
+      });
+    });
+
+    new SubscriptionClient(`ws://localhost:${RAW_TEST_PORT}/`, {
+      connectionParams: new Promise((resolve) => {
+        setTimeout(() => {
+          resolve(connectionParams);
+        }, 100);
+      }),
+    });
+  });
+
+  it('should send connectionParams as a function which returns a promise along with init message', (done) => {
+    const connectionParams: any = {
+      test: true,
+    };
+    wsServer.on('connection', (connection: any) => {
+      connection.on('message', (message: any) => {
+        const parsedMessage = JSON.parse(message);
+        expect(JSON.stringify(parsedMessage.payload)).to.equal(JSON.stringify(connectionParams));
+        done();
+      });
+    });
+
+    new SubscriptionClient(`ws://localhost:${RAW_TEST_PORT}/`, {
+      connectionParams: new Promise((resolve) => {
+        setTimeout(() => {
+          resolve(connectionParams);
+        }, 100);
+      }),
+    });
+  });
+
+  it('should catch errors in connectionParams which came from a promise', (done) => {
+    const error = 'foo';
+
+    wsServer.on('connection', (connection: any) => {
+      connection.on('message', (message: any) => {
+        const parsedMessage = JSON.parse(message);
+        expect(parsedMessage.payload).to.equal(error);
+        done();
+      });
+    });
+
+    new SubscriptionClient(`ws://localhost:${RAW_TEST_PORT}/`, {
+      connectionParams: new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(error);
+        }, 100);
+      }),
+    });
+  });
+
   it('should override OperationOptions with middleware', function (done) {
     const client3 = new SubscriptionClient(`ws://localhost:${TEST_PORT}/`);
     let asyncFunc = (next: any) => {
@@ -544,7 +650,7 @@ describe('Client', function () {
           }`,
         operationName: 'useInfo',
         variables: {
-          id: 3,
+          id: '3',
         },
       }).subscribe({
         next: (result: any) => {
@@ -702,6 +808,7 @@ describe('Client', function () {
           if (result.errors.length) {
             client.unsubscribeAll();
             done();
+            return;
           }
 
           if (result) {
@@ -925,29 +1032,6 @@ describe('Client', function () {
     });
   });
 
-  it('should throw an exception when trying to request when socket is closed', function (done) {
-    let client: SubscriptionClient = null;
-
-    client = new SubscriptionClient(`ws://localhost:${TEST_PORT}/`, { reconnect: true });
-
-    setTimeout(() => {
-      client.client.close();
-    }, 500);
-
-    setTimeout(() => {
-      expect(() => {
-        client.request({
-          query: `subscription useInfo{
-            invalid
-          }`,
-          variables: {},
-        }).subscribe({});
-
-        done();
-      }).to.throw();
-    }, 1000);
-  });
-
   it('should emit event when an websocket error occurs', function (done) {
     const client = new SubscriptionClient(`ws://localhost:${ERROR_TEST_PORT}/`);
 
@@ -972,21 +1056,26 @@ describe('Client', function () {
     wsServer.on('connection', (connection: WebSocket) => {
       connection.close();
     });
-
+    let errorCount = 0;
     const subscriptionsClient = new SubscriptionClient(`ws://localhost:${RAW_TEST_PORT}/`, {
       timeout: 500,
       reconnect: true,
       reconnectionAttempts: 2,
     });
+    subscriptionsClient.onError((error) => {
+      expect(error.message).to.contain('A message was not sent');
+      errorCount += 1;
+    });
     const connectSpy = sinon.spy(subscriptionsClient as any, 'connect');
 
     setTimeout(() => {
       expect(connectSpy.callCount).to.be.equal(2);
+      expect(errorCount).to.be.equal(1);
       done();
     }, 1500);
   });
 
-  it('should stop trying to reconnect to the server if it not receives the ack', function (done) {
+  it('should stop trying to reconnect to the server if it does not receives the ack', function (done) {
     const subscriptionsClient = new SubscriptionClient(`ws://localhost:${RAW_TEST_PORT}/`, {
       timeout: 500,
       reconnect: true,
@@ -1253,10 +1342,10 @@ describe('Server', function () {
     }
 
     if (eventsOptions) {
-      eventsOptions.onConnect.reset();
-      eventsOptions.onDisconnect.reset();
-      eventsOptions.onOperation.reset();
-      eventsOptions.onOperationComplete.reset();
+      eventsOptions.onConnect.resetHistory();
+      eventsOptions.onDisconnect.resetHistory();
+      eventsOptions.onOperation.resetHistory();
+      eventsOptions.onOperationComplete.resetHistory();
     }
   });
 
@@ -1278,10 +1367,81 @@ describe('Server', function () {
     }).to.throw();
   });
 
-  it('should throw an exception when using execute but schema is missing', () => {
-    expect(() => {
-      new SubscriptionServer({ execute: {} as any }, { server: httpServer });
-    }).to.throw();
+  it('should throw an exception when schema is not provided', (done) => {
+    server = createServer(notFoundRequestListener);
+    server.listen(SERVER_EXECUTOR_TESTS_PORT);
+
+    SubscriptionServer.create({
+      execute,
+    }, {
+      server,
+      path: '/',
+    });
+
+    let errorMessage: string;
+
+    const client = new SubscriptionClient(`ws://localhost:${SERVER_EXECUTOR_TESTS_PORT}/`);
+    client.onConnected(() => {
+      client.request({
+        query: `query { testString }`,
+        variables: {},
+      }).subscribe({
+        next: (res) => {
+          assert(false, 'expected error to be thrown');
+        },
+        error: (err) => {
+          errorMessage = err.message;
+          expect(errorMessage).to.contain('Missing schema information');
+          done();
+        },
+        complete: () => {
+          assert(false, 'expected error to be thrown');
+        },
+      });
+    });
+  });
+
+  it('should use schema provided in onOperation', (done) => {
+    server = createServer(notFoundRequestListener);
+    server.listen(SERVER_EXECUTOR_TESTS_PORT);
+
+    SubscriptionServer.create({
+      execute,
+      onOperation: () => {
+        return {
+          schema,
+        };
+      },
+    }, {
+      server,
+      path: '/',
+    });
+
+    let msgCnt = 0;
+
+    const client = new SubscriptionClient(`ws://localhost:${SERVER_EXECUTOR_TESTS_PORT}/`);
+    client.onConnected(() => {
+      client.request({
+        query: `query { testString }`,
+        variables: {},
+      }).subscribe({
+        next: (res) => {
+          if ( res.errors ) {
+            assert(false, 'unexpected error from request');
+          }
+
+          expect(res.data).to.deep.equal({ testString: 'value' });
+          msgCnt ++;
+        },
+        error: (err) => {
+          assert(false, 'unexpected error from request');
+        },
+        complete: () => {
+          expect(msgCnt).to.equals(1);
+          done();
+        },
+      });
+    });
   });
 
   it('should accept execute method than returns a Promise (original execute)', (done) => {
@@ -1592,7 +1752,7 @@ describe('Server', function () {
       }`,
         operationName: 'useInfo',
         variables: {
-          id: 3,
+          id: '3',
         },
       }).subscribe({});
 
@@ -1617,7 +1777,7 @@ describe('Server', function () {
         }`,
       operationName: 'useInfo',
       variables: {
-        id: 3,
+        id: '3',
       },
     }).subscribe({
       next: (result: any) => {
@@ -1644,7 +1804,7 @@ describe('Server', function () {
         }`,
       operationName: 'useInfo',
       variables: {
-        id: 3,
+        id: '3',
       },
     }).subscribe({
       next: (result: any) => {
@@ -1684,7 +1844,7 @@ describe('Server', function () {
         }`,
         operationName: 'useInfo',
         variables: {
-          id: 3,
+          id: '3',
         },
 
       }).subscribe({
@@ -1716,7 +1876,7 @@ describe('Server', function () {
         }`,
         operationName: 'useInfo',
         variables: {
-          id: 2,
+          id: '2',
         },
 
       }).subscribe({
@@ -1745,7 +1905,7 @@ describe('Server', function () {
       client1.unsubscribeAll();
       expect(numResults1).to.equals(1);
       done();
-    }, 300);
+    }, 400);
 
   });
 
@@ -1762,6 +1922,7 @@ describe('Server', function () {
 
         if (messageData.type === MessageTypes.GQL_COMPLETE) {
           done();
+          return;
         }
 
         const result = messageData.payload;
@@ -1777,7 +1938,7 @@ describe('Server', function () {
         }`,
         operationName: 'useInfo',
         variables: {
-          id: 3,
+          id: '3',
         },
       }).subscribe({});
     }, 100);
@@ -1798,7 +1959,7 @@ describe('Server', function () {
           }`,
           operationName: 'userInfoFilter1',
           variables: {
-            id: 3,
+            id: '3',
           },
         }).subscribe({
           next: (result: any) => {
@@ -1825,7 +1986,7 @@ describe('Server', function () {
           }`,
           operationName: 'userInfoFilter1',
           variables: {
-            id: 1,
+            id: '1',
           },
         }).subscribe({
           next: (result: any) => {
@@ -1928,7 +2089,7 @@ describe('Server', function () {
     }`,
       operationName: 'useInfo',
       variables: {
-        id: 3,
+        id: '3',
       },
     }).subscribe({});
   });
@@ -2203,8 +2364,8 @@ describe('Client<->Server Flow', () => {
   });
 
   it('should close iteration over AsyncIterator when client unsubscribes', async () => {
-    subscriptionAsyncIteratorSpy.reset();
-    resolveAsyncIteratorSpy.reset();
+    subscriptionAsyncIteratorSpy.resetHistory();
+    resolveAsyncIteratorSpy.resetHistory();
 
     server = createServer(notFoundRequestListener);
     server.listen(SERVER_EXECUTOR_TESTS_PORT);
@@ -2263,10 +2424,10 @@ describe('Client<->Server Flow', () => {
     expect(subscriptionAsyncIteratorSpy.callCount).to.eq(2);
     expect(resolveAsyncIteratorSpy.callCount).to.eq(2);
     // Clear spies before publishing again
-    subscriptionAsyncIteratorSpy.reset();
-    resolveAsyncIteratorSpy.reset();
-    client1.spy.reset();
-    client2.spy.reset();
+    subscriptionAsyncIteratorSpy.resetHistory();
+    resolveAsyncIteratorSpy.resetHistory();
+    client1.spy.resetHistory();
+    client2.spy.resetHistory();
 
     // Unsubscribe client 1
     client1.unsubscribe();
@@ -2286,7 +2447,7 @@ describe('Client<->Server Flow', () => {
   });
 
   it('should close iteration over AsyncIterator when client disconnects', async () => {
-    resolveAsyncIteratorSpy.reset();
+    resolveAsyncIteratorSpy.resetHistory();
 
     server = createServer(notFoundRequestListener);
     server.listen(SERVER_EXECUTOR_TESTS_PORT);
@@ -2343,9 +2504,9 @@ describe('Client<->Server Flow', () => {
     // But the async iterator subscription should call twice, one for each subscription
     expect(resolveAsyncIteratorSpy.callCount).to.eq(2);
     // Clear spies before publishing again
-    resolveAsyncIteratorSpy.reset();
-    client1.spy.reset();
-    client2.spy.reset();
+    resolveAsyncIteratorSpy.resetHistory();
+    client1.spy.resetHistory();
+    client2.spy.resetHistory();
 
     // Close client 1
     client1.close();
@@ -2435,5 +2596,64 @@ describe('Client<->Server Flow', () => {
         },
       });
     });
+  });
+
+  it('works with custom WebSocket implementation', (done) => {
+    const MockServer = require('mock-socket-with-protocol').Server;
+    const MockWebSocket = require('mock-socket-with-protocol').WebSocket;
+
+    const CUSTOM_PORT = 234235;
+    const customServer = new MockServer(`ws://localhost:${CUSTOM_PORT}`);
+    SubscriptionServer.create(
+      {
+        schema,
+        execute,
+        subscribe,
+      },
+      customServer,
+    );
+
+    const client = new SubscriptionClient(`ws://localhost:${CUSTOM_PORT}`, {},
+      MockWebSocket,
+    );
+
+    let numTriggers = 0;
+        client.request({
+            query: `
+            subscription userInfoFilter1($id: String) {
+              userFiltered(id: $id) {
+                id
+                name
+              }
+            }`,
+            operationName: 'userInfoFilter1',
+            variables: {
+                id: '3',
+            },
+        }).subscribe({
+            next: (result: any) => {
+                if (result.errors) {
+                    assert(false);
+                }
+
+                if (result.data) {
+                    numTriggers += 1;
+                    assert.property(result.data, 'userFiltered');
+                    assert.equal(result.data.userFiltered.id, '3');
+                    assert.equal(result.data.userFiltered.name, 'Jessie');
+                }
+            },
+        });
+
+    setTimeout(() => {
+      testPubsub.publish('userFiltered', {id: 1});
+      testPubsub.publish('userFiltered', {id: 2});
+      testPubsub.publish('userFiltered', {id: 3});
+    }, 50);
+
+    setTimeout(() => {
+      expect(numTriggers).equal(1);
+      done();
+    }, 200);
   });
 });

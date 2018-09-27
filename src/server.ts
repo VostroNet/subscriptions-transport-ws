@@ -2,7 +2,7 @@ import * as WebSocket from 'ws';
 
 import MessageTypes from './message-types';
 import { GRAPHQL_WS, GRAPHQL_SUBSCRIPTIONS } from './protocol';
-import isObject = require('lodash.isobject');
+import isObject from './utils/is-object';
 import {
   parse,
   ExecutionResult,
@@ -29,6 +29,7 @@ export interface ExecutionParams<TContext = any> {
   formatResponse?: Function;
   formatError?: Function;
   callback?: Function;
+  schema?: GraphQLSchema;
 }
 
 export type ConnectionContext = {
@@ -61,6 +62,7 @@ export type ExecuteFunction = (schema: GraphQLSchema,
                                variableValues?: { [key: string]: any },
                                operationName?: string,
                                fieldResolver?: GraphQLFieldResolver<any, any>) =>
+                               ExecutionResult |
                                Promise<ExecutionResult> |
                                AsyncIterator<ExecutionResult>;
 
@@ -80,14 +82,16 @@ export interface ServerOptions {
   schema?: GraphQLSchema;
   execute?: ExecuteFunction;
   subscribe?: SubscribeFunction;
-  validationRules?: Array<(context: ValidationContext) => any>;
-
+  validationRules?:
+    Array<(context: ValidationContext) => any> | ReadonlyArray<any>;
   onOperation?: Function;
   onOperationComplete?: Function;
   onConnect?: Function;
   onDisconnect?: Function;
   keepAlive?: number;
 }
+
+const isWebSocketServer = (socket: any) => socket.on;
 
 export class SubscriptionServer {
   private onOperation: Function;
@@ -102,13 +106,15 @@ export class SubscriptionServer {
   private rootValue: any;
   private keepAlive: number;
   private closeHandler: () => void;
-  private specifiedRules: Array<(context: ValidationContext) => any>;
+  private specifiedRules:
+    Array<(context: ValidationContext) => any> |
+    ReadonlyArray<any>;
 
-  public static create(options: ServerOptions, socketOptions: WebSocket.ServerOptions) {
-    return new SubscriptionServer(options, socketOptions);
+  public static create(options: ServerOptions, socketOptionsOrServer: WebSocket.ServerOptions | WebSocket.Server) {
+    return new SubscriptionServer(options, socketOptionsOrServer);
   }
 
-  constructor(options: ServerOptions, socketOptions: WebSocket.ServerOptions) {
+  constructor(options: ServerOptions, socketOptionsOrServer: WebSocket.ServerOptions | WebSocket.Server) {
     const {
       onOperation, onOperationComplete, onConnect, onDisconnect, keepAlive,
     } = options;
@@ -122,8 +128,12 @@ export class SubscriptionServer {
     this.onDisconnect = onDisconnect;
     this.keepAlive = keepAlive;
 
-    // Init and connect websocket server to http
-    this.wsServer = new WebSocket.Server(socketOptions || {});
+    if (isWebSocketServer(socketOptionsOrServer)) {
+      this.wsServer = <WebSocket.Server>socketOptionsOrServer;
+    } else {
+      // Init and connect WebSocket server to http
+      this.wsServer = new WebSocket.Server(socketOptionsOrServer || {});
+    }
 
     const connectionHandler = ((socket: WebSocket, request: IncomingMessage) => {
       // Add `upgradeReq` to the socket object to support old API, without creating a memory leak
@@ -193,10 +203,6 @@ export class SubscriptionServer {
 
     if (!execute) {
       throw new Error('Must provide `execute` for websocket server constructor.');
-    }
-
-    if (!schema) {
-      throw new Error('`schema` is missing');
     }
 
     this.schema = schema;
@@ -311,6 +317,7 @@ export class SubscriptionServer {
               formatResponse: <any>undefined,
               formatError: <any>undefined,
               callback: <any>undefined,
+              schema: this.schema,
             };
             let promisedParams = Promise.resolve(baseParams);
 
@@ -322,7 +329,7 @@ export class SubscriptionServer {
               promisedParams = Promise.resolve(this.onOperation(messageForCallback, baseParams, connectionContext.socket));
             }
 
-            promisedParams.then((params: any) => {
+            promisedParams.then((params) => {
               if (typeof params !== 'object') {
                 const error = `Invalid params returned from onOperation! return values must be an object!`;
                 this.sendError(connectionContext, opId, { message: error });
@@ -330,9 +337,17 @@ export class SubscriptionServer {
                 throw new Error(error);
               }
 
+              if (!params.schema) {
+                const error = 'Missing schema information. The GraphQL schema should be provided either statically in' +
+                  ' the `SubscriptionServer` constructor or as a property on the object returned from onOperation!';
+                this.sendError(connectionContext, opId, { message: error });
+
+                throw new Error(error);
+              }
+
               const document = typeof baseParams.query !== 'string' ? baseParams.query : parse(baseParams.query);
               let executionPromise: Promise<AsyncIterator<ExecutionResult> | ExecutionResult>;
-              const validationErrors: Error[] = validate(this.schema, document, this.specifiedRules);
+              const validationErrors = validate(params.schema, document, this.specifiedRules);
 
               if ( validationErrors.length > 0 ) {
                 executionPromise = Promise.resolve({ errors: validationErrors });
@@ -341,7 +356,7 @@ export class SubscriptionServer {
                 if (this.subscribe && isASubscriptionOperation(document, params.operationName)) {
                   executor = this.subscribe;
                 }
-                executionPromise = Promise.resolve(executor(this.schema,
+                executionPromise = Promise.resolve(executor(params.schema,
                   document,
                   this.rootValue,
                   params.context,
